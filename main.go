@@ -32,7 +32,7 @@ type WgetClone struct {
 // NewWgetClone creates a new instance
 func NewWgetClone() *WgetClone {
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		// No timeout - let downloads run as long as needed
 	}
 
 	return &WgetClone{
@@ -70,6 +70,7 @@ type ProgressWriter struct {
 	filename   string
 	startTime  time.Time
 	lastUpdate time.Time
+	barWidth int
 }
 
 func NewProgressWriter(writer io.Writer, total int64, filename string) *ProgressWriter {
@@ -79,6 +80,7 @@ func NewProgressWriter(writer io.Writer, total int64, filename string) *Progress
 		filename:   filename,
 		startTime:  time.Now(),
 		lastUpdate: time.Now(),
+		barWidth: 50,
 	}
 }
 
@@ -96,21 +98,30 @@ func (p *ProgressWriter) Write(data []byte) (int, error) {
 }
 
 func (p *ProgressWriter) showProgress() {
+	fmt.Print("\r\033[K")
 	if p.total > 0 {
 		percentage := float64(p.written) / float64(p.total) * 100
 		elapsed := time.Since(p.startTime)
 		speed := float64(p.written) / elapsed.Seconds()
 
-		fmt.Printf("\r%s: %.1f%% [%s/%s] %.2f KB/s",
+		// Visual progress bar
+		barProgress := int(float64(p.barWidth) * percentage / 100)
+		bar := strings.Repeat("=", barProgress)
+		if barProgress < p.barWidth {
+			bar += ">" + strings.Repeat(" ", p.barWidth-barProgress-1)
+		}
+
+		fmt.Printf("%s %3.0f%% [%s] %s/%s %.2fKB/s",
 			p.filename,
 			percentage,
+			bar,
 			formatBytes(p.written),
 			formatBytes(p.total),
 			speed/1024)
 	} else {
 		elapsed := time.Since(p.startTime)
 		speed := float64(p.written) / elapsed.Seconds()
-		fmt.Printf("\r%s: %s %.2f KB/s",
+		fmt.Printf("%s %s %.2fKB/s",
 			p.filename,
 			formatBytes(p.written),
 			speed/1024)
