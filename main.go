@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ type WgetClone struct {
 	client      *http.Client
 	interrupted bool
 	mutex       sync.RWMutex
+	mirrorBaseDir string
 }
 
 // NewWgetClone creates a new instance
@@ -71,9 +73,10 @@ type ProgressWriter struct {
 	startTime  time.Time
 	lastUpdate time.Time
 	barWidth int
-}
+	isMirroring bool
+	}
 
-func NewProgressWriter(writer io.Writer, total int64, filename string) *ProgressWriter {
+func NewProgressWriter(writer io.Writer, total int64, filename string, isMirroring bool) *ProgressWriter {
 	return &ProgressWriter{
 		writer:     writer,
 		total:      total,
@@ -81,23 +84,31 @@ func NewProgressWriter(writer io.Writer, total int64, filename string) *Progress
 		startTime:  time.Now(),
 		lastUpdate: time.Now(),
 		barWidth: 50,
-	}
+		isMirroring:  isMirroring,
+		}
 }
 
 func (p *ProgressWriter) Write(data []byte) (int, error) {
 	n, err := p.writer.Write(data)
 	p.written += int64(n)
 
-	// Update progress every 100ms
-	if time.Since(p.lastUpdate) > 100*time.Millisecond {
-		p.showProgress()
-		p.lastUpdate = time.Now()
+	if !p.isMirroring { // Only show real-time progress for single non-mirror downloads
+		// Update progress every 100ms
+		if time.Since(p.lastUpdate) > 100*time.Millisecond {
+			p.showProgress()
+			p.lastUpdate = time.Now()
+		}
 	}
 
 	return n, err
 }
 
 func (p *ProgressWriter) showProgress() {
+	if p.isMirroring {
+		// For mirroring, we just want to print a final message, not continuous updates
+		return
+	}
+
 	fmt.Print("\r\033[K")
 	if p.total > 0 {
 		percentage := float64(p.written) / float64(p.total) * 100
@@ -129,8 +140,13 @@ func (p *ProgressWriter) showProgress() {
 }
 
 func (p *ProgressWriter) Finish() {
-	p.showProgress()
-	fmt.Println()
+	if !p.isMirroring {
+		p.showProgress()
+		fmt.Println()
+	} else {
+		// For mirroring, just print a simple line completion
+		fmt.Printf("Downloaded: %s\n", p.filename)
+	}
 }
 
 // formatBytes converts bytes to human readable format
@@ -208,9 +224,12 @@ func (r *RateLimitedReader) Read(p []byte) (int, error) {
 }
 
 // DownloadFile downloads a single file
-func (w *WgetClone) DownloadFile(urlStr, outputPath, directory string, rateLimit int64) error {
-	startTime := time.Now()
-	fmt.Printf("Starting download at %s\n", startTime.Format("2006-01-02 15:04:05"))
+func (w *WgetClone) DownloadFile(urlStr, outputPath, directory string, rateLimit int64, isMirroring bool) error {
+	// For mirroring, suppress initial download messages to avoid clutter
+	if !isMirroring {
+		startTime := time.Now()
+		fmt.Printf("Starting download at %s\n", startTime.Format("2006-01-02 15:04:05"))
+	}
 
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
@@ -229,35 +248,50 @@ func (w *WgetClone) DownloadFile(urlStr, outputPath, directory string, rateLimit
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	fmt.Printf("Response received: %d %s\n", resp.StatusCode, resp.Status)
+	initialContentLength := resp.ContentLength
 
-	contentLength := resp.ContentLength
-	if contentLength > 0 {
-		fmt.Printf("Content size: %s\n", formatBytes(contentLength))
-	}
-
-	// Determine output path
-	if outputPath == "" {
-		parsedURL, _ := url.Parse(urlStr)
-		outputPath = path.Base(parsedURL.Path)
-		if outputPath == "" || outputPath == "/" {
-			outputPath = "index.html"
+	// For mirroring, suppress content details
+	if !isMirroring {
+		fmt.Printf("Response received: %d %s\n", resp.StatusCode, resp.Status)
+		if initialContentLength > 0 {
+			fmt.Printf("Content size: %s\n", formatBytes(initialContentLength))
 		}
 	}
 
-	if directory != "" {
+	// Determine output path based on mirroring logic
+	finalOutputPath := outputPath
+	if isMirroring {
+		parsedURL, _ := url.Parse(urlStr)
+		relativeURLPath := strings.TrimPrefix(parsedURL.Path, "/")
+		if strings.HasSuffix(relativeURLPath, "/") || filepath.Ext(relativeURLPath) == "" {
+			relativeURLPath = filepath.Join(relativeURLPath, "index.html")
+		}
+		finalOutputPath = filepath.Join(w.mirrorBaseDir, parsedURL.Hostname(), relativeURLPath)
+	} else if outputPath == "" {
+		parsedURL, _ := url.Parse(urlStr)
+		finalOutputPath = path.Base(parsedURL.Path)
+		if finalOutputPath == "" || finalOutputPath == "/" {
+			finalOutputPath = "index.html"
+		}
+	}
+
+	if directory != "" && !isMirroring {
 		if err := os.MkdirAll(directory, 0o755); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
-		outputPath = filepath.Join(directory, outputPath)
+		finalOutputPath = filepath.Join(directory, finalOutputPath)
 	}
 
-	fmt.Printf("Saving to: %s\n", outputPath)
+	// Ensure the directory for the output path exists
+	dir := filepath.Dir(finalOutputPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory '%s': %w", dir, err)
+	}
 
-	// Create output file
-	file, err := os.Create(outputPath)
+	// Create output file (before reading body to avoid re-reading for HTML rewrite)
+	file, err := os.Create(finalOutputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return fmt.Errorf("failed to create file '%s': %w", finalOutputPath, err)
 	}
 	defer file.Close()
 
@@ -267,11 +301,12 @@ func (w *WgetClone) DownloadFile(urlStr, outputPath, directory string, rateLimit
 		reader = NewRateLimitedReader(reader, rateLimit)
 	}
 
-	progress := NewProgressWriter(file, contentLength, filepath.Base(outputPath))
+	// Initialize progress *before* io.Copy, using the captured initialContentLength
+	progress := NewProgressWriter(file, initialContentLength, filepath.Base(finalOutputPath), isMirroring)
 
 	// Copy with progress
-	written, err := io.Copy(progress, reader)
-	progress.Finish()
+	written, err := io.Copy(progress, reader) // This will read the body and write to the file
+	progress.Finish()                         // This will print a simple "Downloaded: X" if mirroring
 
 	if err != nil {
 		if w.IsInterrupted() {
@@ -280,10 +315,12 @@ func (w *WgetClone) DownloadFile(urlStr, outputPath, directory string, rateLimit
 		return fmt.Errorf("download failed: %w", err)
 	}
 
-	endTime := time.Now()
-	fmt.Printf("Downloaded successfully: %s\n", urlStr)
-	fmt.Printf("Finished at %s\n", endTime.Format("2006-01-02 15:04:05"))
-	fmt.Printf("Total downloaded: %s\n", formatBytes(written))
+	if !isMirroring {
+		endTime := time.Now()
+		fmt.Printf("Downloaded successfully: %s\n", urlStr)
+		fmt.Printf("Finished at %s\n", endTime.Format("2006-01-02 15:04:05"))
+		fmt.Printf("Total downloaded: %s\n", formatBytes(written))
+	}
 
 	return nil
 }
@@ -331,8 +368,11 @@ func (w *WgetClone) DownloadMultipleFiles(urls []string, maxConcurrent int) erro
 	var mu sync.Mutex
 	successful := 0
 
+	fmt.Printf("Starting concurrent download of %d files with %d max concurrency...\n", len(urls), maxConcurrent)
+
 	for _, urlStr := range urls {
 		if w.IsInterrupted() {
+			fmt.Println("Concurrent download interrupted.")
 			break
 		}
 
@@ -343,12 +383,15 @@ func (w *WgetClone) DownloadMultipleFiles(urls []string, maxConcurrent int) erro
 			sem <- struct{}{}        // Acquire semaphore
 			defer func() { <-sem }() // Release semaphore
 
-			if err := w.DownloadFile(url, "", "", 0); err != nil {
+			// For concurrent downloads, we don't pass `isMirroring=true` to DownloadFile
+			// because they are individual files, not part of a recursive mirror.
+			if err := w.DownloadFile(url, "", "", 0, false); err != nil {
 				fmt.Printf("Error downloading %s: %v\n", url, err)
 			} else {
 				mu.Lock()
 				successful++
 				mu.Unlock()
+				fmt.Printf("Finished: %s\n", url)
 			}
 		}(urlStr)
 	}
@@ -357,6 +400,74 @@ func (w *WgetClone) DownloadMultipleFiles(urls []string, maxConcurrent int) erro
 	fmt.Printf("\nDownload summary: %d/%d files downloaded successfully\n", successful, len(urls))
 
 	return nil
+}
+
+// HTML rewriting utility
+// rewriteHTML adjusts relative/absolute paths in HTML to be local
+func rewriteHTML(content string, currentURL, baseURL string) (string, error) {
+	doc, err := html.Parse(strings.NewReader(content))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse HTML: %w", err)
+	}
+
+	currentParsedURL, _ := url.Parse(currentURL)
+	baseParsedURL, _ := url.Parse(baseURL)
+
+	var rewrite func(*html.Node)
+	rewrite = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			for i, a := range n.Attr {
+				var attrToRewrite bool
+				switch n.Data {
+				case "a", "link":
+					attrToRewrite = (a.Key == "href")
+				case "img", "script":
+					attrToRewrite = (a.Key == "src")
+				}
+
+				if attrToRewrite {
+					originalVal := a.Val
+					parsedLink, err := url.Parse(originalVal)
+					if err != nil {
+						continue
+					}
+					resolvedURL := currentParsedURL.ResolveReference(parsedLink)
+					if resolvedURL.Hostname() == baseParsedURL.Hostname() {
+						relativePath := strings.TrimPrefix(resolvedURL.Path, "/")
+						if strings.HasSuffix(relativePath, "/") || filepath.Ext(relativePath) == "" {
+							relativePath = filepath.Join(relativePath, "index.html")
+						}
+						localPath := filepath.Join(resolvedURL.Hostname(), relativePath)
+						currentFileLocalPath := filepath.Join(currentParsedURL.Hostname(), strings.TrimPrefix(currentParsedURL.Path, "/"))
+						if strings.HasSuffix(currentFileLocalPath, "/") || filepath.Ext(currentFileLocalPath) == "" {
+							currentFileLocalPath = filepath.Join(currentFileLocalPath, "index.html")
+						}
+						relPath, err := filepath.Rel(filepath.Dir(currentFileLocalPath), localPath)
+						if err == nil {
+							a.Val = relPath
+							n.Attr[i] = a
+						} else {
+							a.Val = "/" + localPath
+							n.Attr[i] = a
+						}
+
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			rewrite(c)
+		}
+	}
+
+	rewrite(doc)
+
+	var buf bytes.Buffer
+	err = html.Render(&buf, doc)
+	if err != nil {
+		return "", fmt.Errorf("failed to render modified HTML: %w", err)
+	}
+	return buf.String(), nil
 }
 
 // extractLinks extracts links from HTML content
@@ -376,6 +487,8 @@ func extractLinks(htmlContent, baseURL string) ([]string, error) {
 				attrName = "href"
 			case "img", "script":
 				attrName = "src"
+			case "form":
+				attrName = "action"
 			}
 
 			if attrName != "" {
@@ -384,7 +497,10 @@ func extractLinks(htmlContent, baseURL string) ([]string, error) {
 						if fullURL, err := url.Parse(attr.Val); err == nil {
 							if base, err := url.Parse(baseURL); err == nil {
 								resolved := base.ResolveReference(fullURL)
-								links = append(links, resolved.String())
+								// Only add if it's http/https and not a data URI etc.
+								if resolved.Scheme == "http" || resolved.Scheme == "https" {
+									links = append(links, resolved.String())
+								}
 							}
 						}
 						break
@@ -404,13 +520,18 @@ func extractLinks(htmlContent, baseURL string) ([]string, error) {
 
 // shouldReject checks if a URL should be rejected based on filters
 func shouldReject(urlStr string, reject, exclude []string) bool {
-	for _, ext := range reject {
-		if strings.HasSuffix(urlStr, ext) {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(parsedURL.Path))
+	for _, rExt := range reject {
+		if ext == "."+strings.ToLower(rExt) {
 			return true
 		}
 	}
 	for _, pattern := range exclude {
-		if strings.Contains(urlStr, pattern) {
+		if strings.Contains(parsedURL.Path, pattern) {
 			return true
 		}
 	}
@@ -419,16 +540,32 @@ func shouldReject(urlStr string, reject, exclude []string) bool {
 }
 
 // MirrorWebsite mirrors a website recursively
-func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]bool, reject, exclude []string, maxDepth, currentDepth int) error {
-	if currentDepth > maxDepth || visited[urlStr] || w.IsInterrupted() {
-		return nil
+func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]bool, reject, exclude []string, maxDepth, currentDepth int, wg *sync.WaitGroup, sem chan struct{}) {
+	defer wg.Done() // Decrement counter when goroutine finishes
+
+	if w.IsInterrupted() {
+		return
+	}
+	if currentDepth > maxDepth {
+		fmt.Printf("Skipping %s: Max depth (%d) reached.\n", urlStr, maxDepth)
+		return
 	}
 
+	// Lock for `visited` map access
+	w.mutex.Lock()
+	if visited[urlStr] {
+		w.mutex.Unlock()
+		return
+	}
 	visited[urlStr] = true
+	w.mutex.Unlock()
+
+	fmt.Printf("Mirroring: %s (Depth: %d)\n", urlStr, currentDepth)
 
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
-		return err
+		fmt.Printf("Error forming request for %s: %v\n", urlStr, err)
+		return
 	}
 
 	req.Header.Set("User-Agent", "Go-Wget-Clone/1.0")
@@ -436,107 +573,156 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 	resp, err := w.client.Do(req)
 	if err != nil {
 		fmt.Printf("Error accessing %s: %v\n", urlStr, err)
-		return nil
+		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
 		fmt.Printf("404 Not Found: %s\n", urlStr)
-		return nil
+		return
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("HTTP %d for %s\n", resp.StatusCode, urlStr)
-		return nil
+		return
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 
+	// Read content fully into memory for processing (especially for HTML rewriting)
+	contentBytes, err := io.ReadAll(resp.Body) // Read the entire body here
+	if err != nil {
+		fmt.Printf("Error reading content from %s: %v\n", urlStr, err)
+		return
+	}
+
+	// Determine output path based on mirroring logic
+	parsedURL, _ := url.Parse(urlStr)
+	relativeURLPath := strings.TrimPrefix(parsedURL.Path, "/")
+	if strings.HasSuffix(relativeURLPath, "/") || filepath.Ext(relativeURLPath) == "" {
+		relativeURLPath = filepath.Join(relativeURLPath, "index.html")
+	}
+	// Combine with the base mirroring directory and hostname
+	localFilePath := filepath.Join(w.mirrorBaseDir, parsedURL.Hostname(), relativeURLPath)
+
+	// Ensure directory exists
+	dir := filepath.Dir(localFilePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Printf("Failed to create directory '%s': %v\n", dir, err)
+		return
+	}
+
 	// Handle HTML content
 	if strings.Contains(contentType, "text/html") {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
+		contentString := string(contentBytes)
 
-		content := string(body)
-
-		// Extract and process links
-		links, err := extractLinks(content, baseURL)
+		// Extract and process links (before rewriting content for saving)
+		links, err := extractLinks(contentString, baseURL)
 		if err == nil {
 			baseURLParsed, _ := url.Parse(baseURL)
 
 			for _, link := range links {
+				if w.IsInterrupted() {
+					return
+				}
 				if shouldReject(link, reject, exclude) {
 					continue
 				}
 
 				linkParsed, err := url.Parse(link)
 				if err != nil {
+					fmt.Printf("Warning: Malformed link found: %s, %v\n", link, err)
 					continue
 				}
 
-				// Only follow links within the same domain
-				if linkParsed.Host == baseURLParsed.Host {
-					// Determine if this is a page or resource
-					ext := strings.ToLower(filepath.Ext(linkParsed.Path))
-					if ext == "" || ext == ".html" || ext == ".htm" {
-						// Recursively mirror pages
-						w.MirrorWebsite(link, baseURL, visited, reject, exclude, maxDepth, currentDepth+1)
-					} else {
-						// Download resources directly
-						if !visited[link] {
-							visited[link] = true
-							w.DownloadFile(link, "", "", 0)
-						}
-					}
+				// Only follow links within the base domain being mirrored
+				if linkParsed.Hostname() == baseURLParsed.Hostname() {
+					// Add to waitgroup and acquire semaphore before launching goroutine
+					wg.Add(1)
+					sem <- struct{}{}
+					go func(l string) {
+						defer func() { <-sem }() // Release semaphore
+						w.MirrorWebsite(l, baseURL, visited, reject, exclude, maxDepth, currentDepth+1, wg, sem)
+					}(link)
 				}
 			}
+		} else {
+			fmt.Printf("Error extracting links from %s: %v\n", urlStr, err)
+		}
+
+		// Rewrite HTML content after links have been processed
+		rewrittenContent, rewriteErr := rewriteHTML(contentString, urlStr, baseURL)
+		if rewriteErr != nil {
+			fmt.Printf("Error rewriting HTML for %s: %v\n", urlStr, rewriteErr)
+			// Continue saving original if rewrite fails
+		} else {
+			contentBytes = []byte(rewrittenContent) // Update contentBytes with rewritten content
 		}
 
 		// Save HTML file
-		parsedURL, _ := url.Parse(urlStr)
-		outputPath := strings.TrimPrefix(parsedURL.Path, "/")
-		if outputPath == "" {
-			outputPath = "index.html"
-		} else if filepath.Ext(outputPath) == "" {
-			outputPath = filepath.Join(outputPath, "index.html")
+		file, err := os.Create(localFilePath)
+		if err != nil {
+			fmt.Printf("Failed to create HTML file '%s': %v\n", localFilePath, err)
+			return
 		}
+		defer file.Close()
 
-		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err == nil {
-			if file, err := os.Create(outputPath); err == nil {
-				defer file.Close()
-				file.WriteString(content)
-			}
+		// Use ProgressWriter for saving HTML, passing len(contentBytes) as total
+		htmlProgressWriter := NewProgressWriter(file, int64(len(contentBytes)), filepath.Base(localFilePath), true)
+		_, err = htmlProgressWriter.Write(contentBytes) // Directly write the bytes
+		htmlProgressWriter.Finish() // Trigger final output for this file
+
+		if err != nil {
+			fmt.Printf("Failed to write to HTML file '%s': %v\n", localFilePath, err)
 		}
 	} else {
-		// Download binary files directly
-		parsedURL, _ := url.Parse(urlStr)
-		outputPath := strings.TrimPrefix(parsedURL.Path, "/")
-		if outputPath == "" {
-			outputPath = "index"
+		// Save non-HTML files directly
+		file, err := os.Create(localFilePath)
+		if err != nil {
+			fmt.Printf("Failed to create file '%s': %v\n", localFilePath, err)
+			return
 		}
+		defer file.Close()
 
-		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err == nil {
-			if file, err := os.Create(outputPath); err == nil {
-				defer file.Close()
-				io.Copy(file, resp.Body)
-			}
+		// Use ProgressWriter for saving binary, passing len(contentBytes) as total
+		binaryProgressWriter := NewProgressWriter(file, int64(len(contentBytes)), filepath.Base(localFilePath), true)
+		_, err = binaryProgressWriter.Write(contentBytes) // Directly write the bytes
+		binaryProgressWriter.Finish() // Trigger final output for this file
+
+		if err != nil {
+			fmt.Printf("Failed to write to file '%s': %v\n", localFilePath, err)
 		}
 	}
-
-	return nil
+	return
 }
-
 // Mirror starts website mirroring
-func (w *WgetClone) Mirror(urlStr string, reject, exclude []string) error {
+func (w *WgetClone) Mirror(urlStr string, reject, exclude []string, maxDepth, maxConcurrent int) error {
 	visited := make(map[string]bool)
-	fmt.Printf("Starting to mirror: %s\n", urlStr)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrent) // Semaphore for concurrency control
 
-	err := w.MirrorWebsite(urlStr, urlStr, visited, reject, exclude, 3, 0)
+	// Set the base directory for mirrored files
+	parsedBaseURL, err := url.Parse(urlStr)
+	if err != nil {
+		return fmt.Errorf("invalid base URL for mirroring: %w", err)
+	}
+	// Default mirror directory is current_dir/domain_name
+	w.mirrorBaseDir = parsedBaseURL.Hostname()
+	if w.mirrorBaseDir == "" {
+		w.mirrorBaseDir = "mirrored_site" // Fallback if hostname is empty (e.g., file:// URLs)
+	}
+	fmt.Printf("Starting to mirror '%s' into directory '%s'\n", urlStr, w.mirrorBaseDir)
 
-	fmt.Printf("Mirroring completed. Visited %d URLs.\n", len(visited))
-	return err
+	wg.Add(1)
+	sem <- struct{}{} // Acquire initial semaphore
+	go func() {
+		defer func() { <-sem }() // Release initial semaphore
+		w.MirrorWebsite(urlStr, urlStr, visited, reject, exclude, maxDepth, 0, &wg, sem)
+	}()
+
+	wg.Wait() // Wait for all mirroring goroutines to complete
+
+	fmt.Printf("\nMirroring completed. Visited %d URLs.\n", len(visited))
+	return nil
 }
 
 func main() {
@@ -549,15 +735,17 @@ func main() {
 		mirror        = flag.Bool("mirror", false, "Mirror website")
 		reject        = flag.String("R", "", "Comma-separated file extensions to reject")
 		exclude       = flag.String("X", "", "Comma-separated paths to exclude")
-		maxConcurrent = flag.Int("max-concurrent", 5, "Maximum concurrent downloads")
+		maxDepth      = flag.Int("l", 3, "Max recursion depth for mirroring")
+		maxConcurrent = flag.Int("max-concurrent", 5, "Maximum concurrent downloads for -i and --mirror")
 	)
 
 	flag.Parse()
 
 	args := flag.Args()
-	if len(args) == 0 && *inputFile == "" {
+	if len(args) == 0 && *inputFile == "" && !*mirror {
 		fmt.Println("Usage: go-wget [options] URL")
 		fmt.Println("       go-wget -i input-file")
+		fmt.Println("       go-wget --mirror URL")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -575,13 +763,21 @@ func main() {
 
 		var rejectList, excludeList []string
 		if *reject != "" {
+			// Split by comma and trim spaces for extensions
 			rejectList = strings.Split(*reject, ",")
+			for i := range rejectList {
+				rejectList[i] = strings.TrimSpace(rejectList[i])
+			}
 		}
 		if *exclude != "" {
+			// Split by comma and trim spaces for paths
 			excludeList = strings.Split(*exclude, ",")
+			for i := range excludeList {
+				excludeList[i] = strings.TrimSpace(excludeList[i])
+			}
 		}
 
-		err = wget.Mirror(args[0], rejectList, excludeList)
+		err = wget.Mirror(args[0], rejectList, excludeList, *maxDepth, *maxConcurrent)
 
 	} else if *inputFile != "" {
 		file, err := os.Open(*inputFile)
@@ -623,7 +819,7 @@ func main() {
 				os.Exit(1)
 			}
 
-			err = wget.DownloadFile(urlStr, *output, *directory, rateLimitBytes)
+			err = wget.DownloadFile(urlStr, *output, *directory, rateLimitBytes, false)
 		}
 	}
 
