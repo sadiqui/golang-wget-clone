@@ -82,8 +82,8 @@ run_test "Download JSON Data" \
     "test_json.json"
 
 # Test 5: Rate limited download
-run_test "Rate Limited Download (50k limit)" \
-    "./wget --rate-limit 50k -O rate_limited.json https://httpbin.org/json" \
+run_test "Rate Limited Download (5k limit)" \
+    "./wget --rate-limit 5k -O rate_limited.json https://httpbin.org/json" \
     "rate_limited.json"
 
 # Test 6: Create input file for multiple downloads
@@ -200,7 +200,7 @@ echo "=== Cleanup ==="
 read -p "Do you want to clean up test files? (y/n): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    rm -f robots.txt test_robots.txt test_json.json rate_limited.json urls.txt wget-log
+    rm -f robots.txt test_robots.txt test_json.json rate_limited.json urls.txt wget-log 2
     rm -rf test_downloads test_mirror
     echo "Test files cleaned up."
 fi

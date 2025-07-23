@@ -13,11 +13,11 @@ echo "Build succeeded."
 [ -d "httpbin.org" ] && echo "PASS: Basic mirror" || echo "FAIL: Basic mirror"
 
 # Test -R rejection
-./wget --mirror -R=png,jpg https://httpbin.org
+./wget --mirror -R=png,jpg,ico https://httpbin.org
 find httpbin.org -name "*.png" | grep -q . && echo "FAIL: -R" || echo "PASS: -R"
 
 # Test -X exclusion
-./wget --mirror -X=/anything,/html https://httpbin.org
+./wget --mirror -X=/anything,/static https://httpbin.org
 [ ! -d "httpbin.org/anything" ] && echo "PASS: -X" || echo "FAIL: -X"
 
 # Test --convert-links (manual verification needed)

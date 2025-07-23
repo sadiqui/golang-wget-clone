@@ -19,24 +19,24 @@ case $choice in
     1)
         echo ""
         echo "Downloading 100MB test file..."
-        ./wget https://ash-speed.hetzner.com/100MB.bin -O test_100mb.bin
+        ./wget -O test_100mb.bin https://ash-speed.hetzner.com/100MB.bin
         FILE="test_100mb.bin"
         ;;
     2)
         echo ""
         echo "Downloading 1GB test file (this will take several minutes)..."
-        ./wget https://ash-speed.hetzner.com/1GB.bin -O test_1gb.bin
+        ./wget -O test_1gb.bin https://ash-speed.hetzner.com/1GB.bin
         FILE="test_1gb.bin"
         ;;
     3)
         echo ""
         echo "Downloading 10GB test file (press Ctrl+C when you've seen enough)..."
-        ./wget https://ash-speed.hetzner.com/10GB.bin -O test_10gb.bin
+        ./wget -O test_10gb.bin https://ash-speed.hetzner.com/10GB.bin
         FILE="test_10gb.bin"
         ;;
     *)
         echo "Invalid choice. Using 100MB file as default."
-        ./wget https://ash-speed.hetzner.com/100MB.bin -O test_100mb.bin
+        ./wget -O test_100mb.bin https://ash-speed.hetzner.com/100MB.bin
         FILE="test_100mb.bin"
         ;;
 esac

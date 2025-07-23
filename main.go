@@ -25,9 +25,9 @@ import (
 
 // WgetClone represents the main application
 type WgetClone struct {
-	client      *http.Client
-	interrupted bool
-	mutex       sync.RWMutex
+	client        *http.Client
+	interrupted   bool
+	mutex         sync.RWMutex
 	mirrorBaseDir string
 }
 
@@ -66,26 +66,26 @@ func (w *WgetClone) IsInterrupted() bool {
 
 // ProgressWriter wraps an io.Writer to show download progress
 type ProgressWriter struct {
-	writer     io.Writer
-	total      int64
-	written    int64
-	filename   string
-	startTime  time.Time
-	lastUpdate time.Time
-	barWidth int
+	writer      io.Writer
+	total       int64
+	written     int64
+	filename    string
+	startTime   time.Time
+	lastUpdate  time.Time
+	barWidth    int
 	isMirroring bool
-	}
+}
 
 func NewProgressWriter(writer io.Writer, total int64, filename string, isMirroring bool) *ProgressWriter {
 	return &ProgressWriter{
-		writer:     writer,
-		total:      total,
-		filename:   filename,
-		startTime:  time.Now(),
-		lastUpdate: time.Now(),
-		barWidth: 50,
-		isMirroring:  isMirroring,
-		}
+		writer:      writer,
+		total:       total,
+		filename:    filename,
+		startTime:   time.Now(),
+		lastUpdate:  time.Now(),
+		barWidth:    50,
+		isMirroring: isMirroring,
+	}
 }
 
 func (p *ProgressWriter) Write(data []byte) (int, error) {
@@ -669,7 +669,7 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 		// Use ProgressWriter for saving HTML, passing len(contentBytes) as total
 		htmlProgressWriter := NewProgressWriter(file, int64(len(contentBytes)), filepath.Base(localFilePath), true)
 		_, err = htmlProgressWriter.Write(contentBytes) // Directly write the bytes
-		htmlProgressWriter.Finish() // Trigger final output for this file
+		htmlProgressWriter.Finish()                     // Trigger final output for this file
 
 		if err != nil {
 			fmt.Printf("Failed to write to HTML file '%s': %v\n", localFilePath, err)
@@ -686,14 +686,14 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 		// Use ProgressWriter for saving binary, passing len(contentBytes) as total
 		binaryProgressWriter := NewProgressWriter(file, int64(len(contentBytes)), filepath.Base(localFilePath), true)
 		_, err = binaryProgressWriter.Write(contentBytes) // Directly write the bytes
-		binaryProgressWriter.Finish() // Trigger final output for this file
+		binaryProgressWriter.Finish()                     // Trigger final output for this file
 
 		if err != nil {
 			fmt.Printf("Failed to write to file '%s': %v\n", localFilePath, err)
 		}
 	}
-	return
 }
+
 // Mirror starts website mirroring
 func (w *WgetClone) Mirror(urlStr string, reject, exclude []string, maxDepth, maxConcurrent int) error {
 	visited := make(map[string]bool)
@@ -733,20 +733,36 @@ func main() {
 		background    = flag.Bool("B", false, "Download in background")
 		inputFile     = flag.String("i", "", "File containing URLs to download")
 		mirror        = flag.Bool("mirror", false, "Mirror website")
-		reject        = flag.String("R", "", "Comma-separated file extensions to reject")
-		exclude       = flag.String("X", "", "Comma-separated paths to exclude")
-		maxDepth      = flag.Int("l", 3, "Max recursion depth for mirroring")
+		reject        = flag.String("R", "", "Comma-separated file extensions to reject") // mirror option
+		exclude       = flag.String("X", "", "Comma-separated paths to exclude")          // mirror option
+		maxDepth      = flag.Int("l", 3, "Max recursion depth for mirroring")             // mirror option
 		maxConcurrent = flag.Int("max-concurrent", 5, "Maximum concurrent downloads for -i and --mirror")
+		// Possible combinations: (`-i` with `-P`, and `--rate-limit` with `-O`)
 	)
 
 	flag.Parse()
 
 	args := flag.Args()
 	if len(args) == 0 && *inputFile == "" && !*mirror {
-		fmt.Println("Usage: go-wget [options] URL")
-		fmt.Println("       go-wget -i input-file")
-		fmt.Println("       go-wget --mirror URL")
+
+		fmt.Println(`
+go-wget - A simple wget clone in Go for downloading files and mirroring websites.
+
+Usage:
+  ./wget [options] URL                Download a single URL.
+  ./wget -i input-file [options]      Download multiple URLs listed in a file.
+  ./wget --mirror URL [options]       Mirror an entire website recursively.
+
+Options:`)
 		flag.PrintDefaults()
+
+		fmt.Print(`
+Examples:
+  ./wget https://example.com/index.html
+  ./wget -i urls.txt -P downloads --rate-limit 5k
+  ./wget --mirror -X "/anything,/static" -R "png,jpg,ico" https://httpbin.org
+`)
+
 		os.Exit(1)
 	}
 
