@@ -362,7 +362,7 @@ func (w *WgetClone) BackgroundDownload(urlStr, outputPath, directory string, rat
 }
 
 // DownloadMultipleFiles downloads multiple files concurrently
-func (w *WgetClone) DownloadMultipleFiles(urls []string, maxConcurrent int) error {
+func (w *WgetClone) DownloadMultipleFiles(urls []string, maxConcurrent int, directory string) error {
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -385,7 +385,7 @@ func (w *WgetClone) DownloadMultipleFiles(urls []string, maxConcurrent int) erro
 
 			// For concurrent downloads, we don't pass `isMirroring=true` to DownloadFile
 			// because they are individual files, not part of a recursive mirror.
-			if err := w.DownloadFile(url, "", "", 0, false); err != nil {
+			if err := w.DownloadFile(url, "", directory, 0, false); err != nil {
 				fmt.Printf("Error downloading %s: %v\n", url, err)
 			} else {
 				mu.Lock()
@@ -817,7 +817,7 @@ Examples:
 			os.Exit(1)
 		}
 
-		err = wget.DownloadMultipleFiles(urls, *maxConcurrent)
+		err = wget.DownloadMultipleFiles(urls, *maxConcurrent, *directory)
 		if err != nil {
 			fmt.Printf("Error downloading files: %v\n", err)
 			os.Exit(1)

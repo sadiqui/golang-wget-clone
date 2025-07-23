@@ -43,8 +43,8 @@ fi
 echo ""
 echo "Test 4: Multiple URLs"
 cat > urls.txt << 'EOF'
-https://httpbin.org/robots.txt
-https://httpbin.org/json
+https://example.com/index.html
+https://httpbin.org/xml
 EOF
 
 ./wget -i urls.txt -P batch_downloads

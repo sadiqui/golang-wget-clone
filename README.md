@@ -33,7 +33,7 @@ mkdir downloads
 ./wget -P downloads https://httpbin.org/xml
 
 # Multiple files download
-echo -e "https://httpbin.org/robots.txt\nhttps://httpbin.org/json" > urls.txt
+echo -e "https://example.com/index.html\nhttps://httpbin.org/xml" > urls.txt
 ./wget -i urls.txt
 
 # Test 404 page
