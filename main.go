@@ -29,6 +29,7 @@ type WgetClone struct {
 	interrupted   bool
 	mutex         sync.RWMutex
 	mirrorBaseDir string
+	visitedMutex  sync.RWMutex // For visited map synchronization
 }
 
 // NewWgetClone creates a new instance
@@ -39,6 +40,7 @@ func NewWgetClone() *WgetClone {
 
 	return &WgetClone{
 		client: client,
+		// visitedMutex is automatically initialized as zero value
 	}
 }
 
@@ -103,8 +105,7 @@ func (p *ProgressWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-// Mutex for stdout synchronization
-var stdoutMutex sync.Mutex
+var stdoutMutex sync.Mutex // Mutex for stdout synchronization
 
 func (p *ProgressWriter) showProgress() {
 	if p.isMirroring {
@@ -467,20 +468,21 @@ func rewriteHTML(content string, currentURL, baseURL string) (string, error) {
 						if strings.HasSuffix(relativePath, "/") || filepath.Ext(relativePath) == "" {
 							relativePath = filepath.Join(relativePath, "index.html")
 						}
-						localPath := filepath.Join(resolvedURL.Hostname(), relativePath)
-						currentFileLocalPath := filepath.Join(currentParsedURL.Hostname(), strings.TrimPrefix(currentParsedURL.Path, "/"))
-						if strings.HasSuffix(currentFileLocalPath, "/") || filepath.Ext(currentFileLocalPath) == "" {
-							currentFileLocalPath = filepath.Join(currentFileLocalPath, "index.html")
+
+						currentRelativePath := strings.TrimPrefix(currentParsedURL.Path, "/")
+						if strings.HasSuffix(currentRelativePath, "/") || filepath.Ext(currentRelativePath) == "" {
+							currentRelativePath = filepath.Join(currentRelativePath, "index.html")
 						}
-						relPath, err := filepath.Rel(filepath.Dir(currentFileLocalPath), localPath)
+
+						// Calculate relative path from current file to target file
+						relPath, err := filepath.Rel(filepath.Dir(currentRelativePath), relativePath)
 						if err == nil {
 							a.Val = relPath
 							n.Attr[i] = a
 						} else {
-							a.Val = "/" + localPath
+							a.Val = "/" + relativePath
 							n.Attr[i] = a
 						}
-
 					}
 				}
 			}
@@ -507,7 +509,7 @@ func extractLinks(htmlContent, baseURL string) ([]string, error) {
 		return nil, err
 	}
 
-	var links []string
+	linkSet := make(map[string]bool) // Using map to avoid duplicates
 	var extract func(*html.Node)
 	extract = func(n *html.Node) {
 		if n.Type == html.ElementNode {
@@ -527,9 +529,18 @@ func extractLinks(htmlContent, baseURL string) ([]string, error) {
 						if fullURL, err := url.Parse(attr.Val); err == nil {
 							if base, err := url.Parse(baseURL); err == nil {
 								resolved := base.ResolveReference(fullURL)
-								// Only add if it's http/https and not a data URI etc.
-								if resolved.Scheme == "http" || resolved.Scheme == "https" {
-									links = append(links, resolved.String())
+
+								// Skip fragment-only URLs (anchors)
+								if resolved.Fragment != "" && resolved.Path == base.Path && resolved.Host == base.Host {
+									continue // Skip same-page anchors like #home, #about
+								}
+
+								// Remove fragment from URL to avoid duplicates
+								resolved.Fragment = ""
+
+								// Only add if it's http/https and not already processed
+								if (resolved.Scheme == "http" || resolved.Scheme == "https") && !linkSet[resolved.String()] {
+									linkSet[resolved.String()] = true
 								}
 							}
 						}
@@ -545,6 +556,13 @@ func extractLinks(htmlContent, baseURL string) ([]string, error) {
 	}
 
 	extract(doc)
+
+	// Convert map to slice
+	links := make([]string, 0, len(linkSet))
+	for link := range linkSet {
+		links = append(links, link)
+	}
+
 	return links, nil
 }
 
@@ -571,7 +589,8 @@ func shouldReject(urlStr string, reject, exclude []string) bool {
 
 // MirrorWebsite mirrors a website recursively
 func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]bool, reject, exclude []string, maxDepth, currentDepth int, wg *sync.WaitGroup, sem chan struct{}) {
-	defer wg.Done() // Decrement counter when goroutine finishes
+	defer wg.Done()          // Decrement counter when goroutine finishes
+	defer func() { <-sem }() // Always release semaphore
 
 	if w.IsInterrupted() {
 		return
@@ -581,14 +600,14 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 		return
 	}
 
-	// Lock for `visited` map access
-	w.mutex.Lock()
+	// Check if already visited with proper locking
+	w.visitedMutex.Lock()
 	if visited[urlStr] {
-		w.mutex.Unlock()
+		w.visitedMutex.Unlock()
 		return
 	}
 	visited[urlStr] = true
-	w.mutex.Unlock()
+	w.visitedMutex.Unlock()
 
 	fmt.Printf("Mirroring: %s (Depth: %d)\n", urlStr, currentDepth)
 
@@ -631,8 +650,8 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 	if strings.HasSuffix(relativeURLPath, "/") || filepath.Ext(relativeURLPath) == "" {
 		relativeURLPath = filepath.Join(relativeURLPath, "index.html")
 	}
-	// Combine with the base mirroring directory and hostname
-	localFilePath := filepath.Join(w.mirrorBaseDir, parsedURL.Hostname(), relativeURLPath)
+	// Combine with the base mirroring directory
+	localFilePath := filepath.Join(w.mirrorBaseDir, relativeURLPath)
 
 	// Ensure directory exists
 	dir := filepath.Dir(localFilePath)
@@ -650,6 +669,10 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 		if err == nil {
 			baseURLParsed, _ := url.Parse(baseURL)
 
+			// Separate critical resources from regular pages
+			var criticalResources []string
+			var regularPages []string
+
 			for _, link := range links {
 				if w.IsInterrupted() {
 					return
@@ -660,19 +683,57 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 
 				linkParsed, err := url.Parse(link)
 				if err != nil {
-					fmt.Printf("Warning: Malformed link found: %s, %v\n", link, err)
+					fmt.Printf("Warning: Malformed link skipped: %s, %v\n", link, err)
 					continue
 				}
 
-				// Only follow links within the base domain being mirrored
+				// Only process links within the base domain
 				if linkParsed.Hostname() == baseURLParsed.Hostname() {
-					// Add to waitgroup and acquire semaphore before launching goroutine
+					// Check if already visited
+					w.visitedMutex.RLock()
+					alreadyVisited := visited[link]
+					w.visitedMutex.RUnlock()
+
+					if !alreadyVisited {
+						ext := strings.ToLower(filepath.Ext(linkParsed.Path))
+						// Prioritize critical resources (CSS, JS, images)
+						if ext == ".css" || ext == ".js" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".svg" {
+							criticalResources = append(criticalResources, link)
+						} else {
+							regularPages = append(regularPages, link)
+						}
+					}
+				}
+			}
+
+			// Process critical resources first with guaranteed slots
+			for _, link := range criticalResources {
+				if w.IsInterrupted() {
+					return
+				}
+
+				// For critical resources, wait for semaphore instead of skipping
+				wg.Add(1)
+				sem <- struct{}{} // Block until semaphore is available
+				go w.MirrorWebsite(link, baseURL, visited, reject, exclude, maxDepth, currentDepth+1, wg, sem)
+			}
+
+			// Process regular pages with non-blocking approach
+			for _, link := range regularPages {
+				if w.IsInterrupted() {
+					return
+				}
+
+				select {
+				case sem <- struct{}{}:
 					wg.Add(1)
-					sem <- struct{}{}
-					go func(l string) {
-						defer func() { <-sem }() // Release semaphore
-						w.MirrorWebsite(l, baseURL, visited, reject, exclude, maxDepth, currentDepth+1, wg, sem)
-					}(link)
+					go w.MirrorWebsite(link, baseURL, visited, reject, exclude, maxDepth, currentDepth+1, wg, sem)
+				default:
+					// Only skip regular pages, not critical resources
+					if currentDepth < maxDepth {
+						fmt.Printf("Semaphore full, queueing for later: %s\n", link)
+						// Could implement a queue here for deferred processing
+					}
 				}
 			}
 		} else {
@@ -697,9 +758,9 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 		defer file.Close()
 
 		// Use ProgressWriter for saving HTML, passing len(contentBytes) as total
-		htmlProgressWriter := NewProgressWriter(file, int64(len(contentBytes)), filepath.Base(localFilePath), true)
-		_, err = htmlProgressWriter.Write(contentBytes) // Directly write the bytes
-		htmlProgressWriter.Finish()                     // Trigger final output for this file
+		progressWriter := NewProgressWriter(file, int64(len(contentBytes)), filepath.Base(localFilePath), true)
+		_, err = progressWriter.Write(contentBytes) // Directly write the bytes
+		progressWriter.Finish()                     // Trigger final output for this file
 
 		if err != nil {
 			fmt.Printf("Failed to write to HTML file '%s': %v\n", localFilePath, err)
@@ -728,6 +789,12 @@ func (w *WgetClone) MirrorWebsite(urlStr, baseURL string, visited map[string]boo
 func (w *WgetClone) Mirror(urlStr string, reject, exclude []string, maxDepth, maxConcurrent int) error {
 	visited := make(map[string]bool)
 	var wg sync.WaitGroup
+
+	// Increase default concurrency for better resource downloading
+	if maxConcurrent < 10 {
+		maxConcurrent = 10 // Minimum 10 for decent parallelism
+	}
+
 	sem := make(chan struct{}, maxConcurrent) // Semaphore for concurrency control
 
 	// Set the base directory for mirrored files
@@ -735,6 +802,7 @@ func (w *WgetClone) Mirror(urlStr string, reject, exclude []string, maxDepth, ma
 	if err != nil {
 		return fmt.Errorf("invalid base URL for mirroring: %w", err)
 	}
+
 	// Default mirror directory is current_dir/domain_name
 	w.mirrorBaseDir = parsedBaseURL.Hostname()
 	if w.mirrorBaseDir == "" {
@@ -744,10 +812,7 @@ func (w *WgetClone) Mirror(urlStr string, reject, exclude []string, maxDepth, ma
 
 	wg.Add(1)
 	sem <- struct{}{} // Acquire initial semaphore
-	go func() {
-		defer func() { <-sem }() // Release initial semaphore
-		w.MirrorWebsite(urlStr, urlStr, visited, reject, exclude, maxDepth, 0, &wg, sem)
-	}()
+	go w.MirrorWebsite(urlStr, urlStr, visited, reject, exclude, maxDepth, 0, &wg, sem)
 
 	wg.Wait() // Wait for all mirroring goroutines to complete
 
