@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
 # Simple tests with guaranteed working URLs
 echo "=== Simple Go Wget Tests ==="
 
@@ -9,39 +15,39 @@ go build -o wget main.go
 
 # Test 1: Basic download
 echo ""
-echo "Test 1: Basic download"
+echo -e "${YELLOW}Test 1: Basic download${NC}"
 ./wget https://httpbin.org/robots.txt
 if [ -f "robots.txt" ]; then
-    echo "✓ SUCCESS - robots.txt downloaded"
+    echo -e "${GREEN}✓ SUCCESS - robots.txt downloaded${NC}"
     echo "Content preview:"
     head -3 robots.txt
 else
-    echo "✗ FAILED"
+    echo -e "${RED}✗ FAILED${NC}"
 fi
 
 echo ""
-echo "Test 2: Download JSON with custom name"
+echo -e "${YELLOW}Test 2: Download JSON with custom name${NC}"
 ./wget -O test.json https://httpbin.org/json
 if [ -f "test.json" ]; then
-    echo "✓ SUCCESS - test.json downloaded"
+    echo -e "${GREEN}✓ SUCCESS - test.json downloaded${NC}"
     echo "Size: $(wc -c < test.json) bytes"
 else
-    echo "✗ FAILED"
+    echo -e "${RED}✗ FAILED${NC}"
 fi
 
 echo ""
-echo "Test 3: Download to directory"
+echo -e "${YELLOW}Test 3: Download to directory${NC}"
 mkdir -p downloads
 ./wget -P downloads https://httpbin.org/xml
 if [ -f "downloads/xml" ]; then
-    echo "✓ SUCCESS - XML downloaded to downloads/"
+    echo -e "${GREEN}✓ SUCCESS - XML downloaded to downloads/${NC}"
     echo "File exists: downloads/xml"
 else
-    echo "✗ FAILED"
+    echo -e "${RED}✗ FAILED${NC}"
 fi
 
 echo ""
-echo "Test 4: Multiple URLs"
+echo -e "${YELLOW}Test 4: Multiple URLs${NC}"
 cat > urls.txt << 'EOF'
 https://example.com/index.html
 https://httpbin.org/xml
@@ -49,10 +55,10 @@ EOF
 
 ./wget -i urls.txt -P batch_downloads
 echo "Batch download files:"
-ls -la batch_downloads/ 2>/dev/null || echo "No files found"
+(ls -la batch_downloads/ 2>/dev/null && echo -e "${GREEN}Files downloaded${NC}") || echo -e "${RED}No files found${NC}"
 
 echo ""
-echo "Test 5: Rate limiting (you should see slower download)"
+echo -e "${YELLOW}Test 5: Rate limiting (10k)${NC}"
 time ./wget --rate-limit 10k https://httpbin.org/json -O slow.json
 
 echo ""
@@ -74,7 +80,7 @@ echo ""
 read -p "Clean up test files? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    rm -f robots.txt test.json slow.json urls.txt
+    rm -f robots.txt test.json slow.json urls.txt json
     rm -rf downloads batch_downloads
     echo "Cleaned up!"
 fi

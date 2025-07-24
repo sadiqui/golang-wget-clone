@@ -151,12 +151,12 @@ echo ""
 
 # Test 10: Simple mirror test (limited to avoid being too aggressive)
 echo -e "${YELLOW}Testing: Basic Mirror Functionality${NC}"
-echo "Command: ./wget --mirror https://httpbin.org/robots.txt"
+echo "Command: ./wget --mirror https://httpbin.org"
 echo ""
 
 cd test_mirror
-if ../wget --mirror https://httpbin.org/robots.txt; then
-    if [ -f "robots.txt" ] || [ -f "index.html" ]; then
+if ../wget --mirror https://httpbin.org; then
+    if [ -d "httpbin.org" ] && [ "$(ls -A httpbin.org)" ]; then
         echo -e "${GREEN}✓ SUCCESS: Mirror created files${NC}"
         ls -la
     else
@@ -178,7 +178,7 @@ find . -name "*.txt" -o -name "*.json" -o -name "*.xml" -o -name "wget-log" | he
 echo ""
 echo "Test directories:"
 echo "- test_downloads/: $(ls test_downloads 2>/dev/null | wc -l) files"
-echo "- test_mirror/: $(ls test_mirror 2>/dev/null | wc -l) files"
+echo "- test_mirror/: $(ls test_mirror 2>/dev/null | wc -l) directories"
 
 echo ""
 echo "=== Manual Verification Commands ==="

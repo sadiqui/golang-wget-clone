@@ -103,11 +103,18 @@ func (p *ProgressWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// Mutex for stdout synchronization
+var stdoutMutex sync.Mutex
+
 func (p *ProgressWriter) showProgress() {
 	if p.isMirroring {
 		// For mirroring, we just want to print a final message, not continuous updates
 		return
 	}
+
+	// Lock stdout to prevent concurrent writes from interfering
+	stdoutMutex.Lock()
+	defer stdoutMutex.Unlock()
 
 	fmt.Print("\r\033[K")
 	if p.total > 0 {
@@ -140,9 +147,32 @@ func (p *ProgressWriter) showProgress() {
 }
 
 func (p *ProgressWriter) Finish() {
+	stdoutMutex.Lock()
+	defer stdoutMutex.Unlock()
+
 	if !p.isMirroring {
-		p.showProgress()
-		fmt.Println()
+		// Clear the current line and show final progress
+		fmt.Print("\r\033[K")
+		if p.total > 0 {
+			percentage := float64(p.written) / float64(p.total) * 100
+			elapsed := time.Since(p.startTime)
+			speed := float64(p.written) / elapsed.Seconds()
+
+			fmt.Printf("%s %3.0f%% [%s] %s/%s %.2fKB/s\n",
+				p.filename,
+				percentage,
+				strings.Repeat("=", p.barWidth),
+				formatBytes(p.written),
+				formatBytes(p.total),
+				speed/1024)
+		} else {
+			elapsed := time.Since(p.startTime)
+			speed := float64(p.written) / elapsed.Seconds()
+			fmt.Printf("%s %s %.2fKB/s\n",
+				p.filename,
+				formatBytes(p.written),
+				speed/1024)
+		}
 	} else {
 		// For mirroring, just print a simple line completion
 		fmt.Printf("Downloaded: %s\n", p.filename)
